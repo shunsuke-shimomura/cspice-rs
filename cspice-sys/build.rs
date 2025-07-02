@@ -8,11 +8,131 @@ const CSPICE_DIR: &str = "CSPICE_DIR";
 const CSPICE_CLANG_TARGET: &str = "CSPICE_CLANG_TARGET";
 const CSPICE_CLANG_ROOT: &str = "CSPICE_CLANG_ROOT";
 
+// Structure for target information
+struct TargetInfo {
+    rust_target: String,
+    clang_target: String,
+    bits: u8,
+    cspice_platform: &'static str,
+    arch_flags: Vec<String>,
+}
+
+impl TargetInfo {
+    fn new(target: &str, host: &str) -> Result<Self, String> {
+        // Determine bit width
+        let bits = determine_bits(target)?;
+
+        // Determine CSPICE download platform
+        let cspice_platform = match (env::consts::OS, bits, target) {
+            ("linux", 64, _) => "PC_Linux_GCC_64bit",
+            ("macos", 64, t) if t.contains("aarch64") => "MacM1_OSX_clang_64bit",
+            ("macos", 64, _) => "MacIntel_OSX_AppleC_64bit",
+            ("windows", 64, _) => "PC_Windows_VisualC_64bit",
+            ("windows", 32, _) => "PC_Windows_VisualC_32bit",
+            _ => {
+                return Err(format!(
+                    "Unsupported platform for CSPICE download: {} {}bit",
+                    env::consts::OS,
+                    bits
+                ))
+            }
+        };
+
+        // Generate Clang target and flags from Rust target
+        let (clang_target, arch_flags) = convert_rust_to_clang_target(target, host);
+
+        Ok(TargetInfo {
+            rust_target: target.to_string(),
+            clang_target,
+            bits,
+            cspice_platform,
+            arch_flags,
+        })
+    }
+}
+
+fn determine_bits(target: &str) -> Result<u8, String> {
+    // Check the first part (architecture) of the target triple
+    let arch = target
+        .split('-')
+        .next()
+        .ok_or_else(|| "Invalid target triple".to_string())?;
+
+    match arch {
+        // 64-bit architectures
+        "x86_64" | "aarch64" | "powerpc64" | "mips64" | "sparc64" => Ok(64),
+        // 32-bit architectures
+        "i686" | "i586" | "i386" | "arm" | "armv7" | "powerpc" | "mips" | "sparc" => Ok(32),
+        // RISC-V
+        arch if arch.starts_with("riscv64") => Ok(64),
+        arch if arch.starts_with("riscv32") => Ok(32),
+        // ARM Thumb
+        arch if arch.starts_with("thumbv") => {
+            // thumbv6m, thumbv7m, thumbv7em, thumbv8m etc. are all 32-bit
+            Ok(32)
+        }
+        _ => Err(format!(
+            "Cannot determine bit width for architecture: {}",
+            arch
+        )),
+    }
+}
+
+fn convert_rust_to_clang_target(rust_target: &str, host: &str) -> (String, Vec<String>) {
+    let mut arch_flags = Vec::new();
+
+    let clang_target = match rust_target {
+        // Apple Silicon
+        "aarch64-apple-darwin" => "arm64-apple-darwin".to_string(),
+        "aarch64-apple-ios" => "arm64-apple-ios".to_string(),
+
+        // RISC-V - separate CPU extensions
+        target if target.starts_with("riscv64gc-") => {
+            arch_flags.push("-march=rv64gc".to_string());
+            target.replace("riscv64gc-", "riscv64-")
+        }
+        target if target.starts_with("riscv32gc-") => {
+            arch_flags.push("-march=rv32gc".to_string());
+            target.replace("riscv32gc-", "riscv32-")
+        }
+
+        // Embedded targets - use host target for bindgen
+        target
+            if target.starts_with("thumbv")
+                || (target.contains("-none-") && !target.contains("x86")) =>
+        {
+            println!(
+                "cargo:warning=Using host target '{}' for bindgen instead of '{}'",
+                host, rust_target
+            );
+            host.to_string()
+        }
+
+        // Otherwise, use as is
+        _ => rust_target.to_string(),
+    };
+
+    (clang_target, arch_flags)
+}
+
 fn main() {
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     if std::env::var("DOCS_RS").is_ok() {
         docs_rs(&out_path);
+        return;
     }
+
+    // Get environment variables
+    let target = env::var("TARGET").expect("TARGET not set");
+    let host = env::var("HOST").expect("HOST not set");
+
+    // Parse target information
+    let target_info = match TargetInfo::new(&target, &host) {
+        Ok(info) => info,
+        Err(e) => {
+            panic!("Failed to analyze target '{}': {}", target, e);
+        }
+    };
 
     println!("cargo:rerun-if-env-changed={}", CSPICE_DIR);
     println!("cargo:rerun-if-env-changed={}", CSPICE_CLANG_TARGET);
@@ -27,13 +147,24 @@ fn main() {
     let cspice_dir = cspice_dir.or_else(|| {
         let downloaded = out_path.join("cspice");
         if !downloaded.exists() {
-            download_cspice(&out_path);
+            println!(
+                "Downloading CSPICE for {}",
+                target_info.cspice_platform
+            );
+            download_cspice(&out_path, &target_info);
         }
         Some(downloaded)
     });
 
-    let cspice_dir =
-		cspice_dir.expect("Cannot build: CSPICE_DIR environment variable was not provided, no CSPICE install was found, and feature \"downloadcspice\" is disabled.");
+    let cspice_dir = cspice_dir.unwrap_or_else(|| {
+        panic!(
+            "Cannot build: CSPICE_DIR environment variable was not provided, \
+             no CSPICE install was found, and feature \"downloadcspice\" is disabled.\n\
+             Target: {} ({}bit)\n\
+             Would download: {}",
+            target_info.rust_target, target_info.bits, target_info.cspice_platform
+        )
+    });
 
     if !cspice_dir.is_dir() {
         panic!(
@@ -44,16 +175,43 @@ fn main() {
 
     let include_dir = cspice_dir.join("include");
 
-    let mut clang_args = vec![];
-    if let Ok(target) = env::var(CSPICE_CLANG_TARGET) {
-        if !target.is_empty() {
-            clang_args.push(format!("--target={}", target));
+    // Build Clang arguments
+    let mut clang_args = target_info.arch_flags.clone();
+
+    // Clang target override from environment variable
+    let clang_target = if let Ok(override_target) = env::var(CSPICE_CLANG_TARGET) {
+        if !override_target.is_empty() {
+            println!(
+                "cargo:warning=Using CSPICE_CLANG_TARGET override: {}",
+                override_target
+            );
+            override_target
+        } else {
+            target_info.clang_target.clone()
         }
+    } else {
+        target_info.clang_target.clone()
+    };
+
+    // Add only if target is not empty (when using host for embedded targets, skip)
+    if !clang_target.is_empty() && clang_target != host {
+        clang_args.push(format!("--target={}", clang_target));
     }
+
+    // Set sysroot
     if let Ok(sysroot) = env::var(CSPICE_CLANG_ROOT) {
         if !sysroot.is_empty() {
             clang_args.push(format!("--sysroot={}", sysroot));
         }
+    }
+
+    // Debug output
+    println!(
+        "Building for target: {} ({}bit)",
+        target_info.rust_target, target_info.bits
+    );
+    if !clang_args.is_empty() {
+        println!("Clang args: {:?}", clang_args);
     }
 
     let bindings = bindgen::Builder::default()
@@ -79,6 +237,7 @@ fn main() {
 fn locate_cspice() -> Option<PathBuf> {
     match env::consts::OS {
         "linux" | "macos" if Path::new("/usr/lib/libcspice.a").exists() => {
+            println!("Found system CSPICE at /usr");
             Some(PathBuf::from("/usr"))
         }
         _ => None,
@@ -87,33 +246,22 @@ fn locate_cspice() -> Option<PathBuf> {
 
 // Fetch CSPICE source from NAIF servers and extract to `<out_dir>/cspice`
 #[cfg(feature = "downloadcspice")]
-fn download_cspice(out_dir: &Path) {
-    // Pick appropriate package to download
-    let (platform, extension) = match env::consts::OS {
-        "linux" => ("PC_Linux_GCC_64bit", "tar.Z"),
-        "macos" => (
-            if cfg!(target_arch = "arm") {
-                "MacM1_OSX_clang_64bit"
-            } else {
-                "MacIntel_OSX_AppleC_64bit"
-            },
-            "tar.Z",
-        ),
-        "windows" => ("PC_Windows_VisualC_64bit", "zip"),
-        _ => {
-            unimplemented!("Cannot fetch CSPICE source for this platform, please download manually")
-        }
+fn download_cspice(out_dir: &Path, target_info: &TargetInfo) {
+    let extension = match env::consts::OS {
+        "linux" | "macos" => "tar.Z",
+        "windows" => "zip",
+        _ => panic!("Cannot download CSPICE for OS: {}", env::consts::OS),
     };
 
     let url = format!(
         "https://naif.jpl.nasa.gov/pub/naif/toolkit//C/{}/packages/cspice.{}",
-        platform, extension
+        target_info.cspice_platform, extension
     );
 
     let download_target = out_dir.join(format!("cspice.{}", extension));
 
     println!("Downloading from: {}", url);
-
+  
     // Tokioランタイムを作成して非同期ダウンロードを実行
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -154,11 +302,11 @@ fn download_cspice(out_dir: &Path) {
         }
         _ => unreachable!(),
     }
+
+    println!("CSPICE download and extraction complete");
 }
 
 // For docs.rs only we will bundle the headers
-// It is not a good idea to do this in general though, it should be specific to the user / platform
-// https://kornel.ski/rust-sys-crate
 fn docs_rs(out_dir: &Path) {
     let headers_dir = out_dir.join("docs-rs-headers");
     fs::create_dir_all(&headers_dir).expect("Unable to create CSPICE headers directory");
