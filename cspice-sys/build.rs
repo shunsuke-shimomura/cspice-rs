@@ -24,9 +24,10 @@ impl TargetInfo {
 
         // Determine CSPICE download platform
         let cspice_platform = match (env::consts::OS, bits, target) {
-            ("linux", 64, _) => "PC_Linux_GCC_64bit",
             ("macos", 64, t) if t.contains("aarch64") => "MacM1_OSX_clang_64bit",
             ("macos", 64, _) => "MacIntel_OSX_AppleC_64bit",
+            ("linux", 64, _) => "PC_Linux_GCC_64bit",
+            ("linux", 32, _) => "PC_Linux_GCC_32bit",
             ("windows", 64, _) => "PC_Windows_VisualC_64bit",
             ("windows", 32, _) => "PC_Windows_VisualC_32bit",
             _ => {
