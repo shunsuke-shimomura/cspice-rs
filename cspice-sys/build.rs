@@ -148,7 +148,7 @@ fn main() {
         let downloaded = out_path.join("cspice");
         if !downloaded.exists() {
             println!(
-                "cargo:warning=Downloading CSPICE for {}",
+                "Downloading CSPICE for {}",
                 target_info.cspice_platform
             );
             download_cspice(&out_path, &target_info);
@@ -207,11 +207,11 @@ fn main() {
 
     // Debug output
     println!(
-        "cargo:warning=Building for target: {} ({}bit)",
+        "Building for target: {} ({}bit)",
         target_info.rust_target, target_info.bits
     );
     if !clang_args.is_empty() {
-        println!("cargo:warning=Clang args: {:?}", clang_args);
+        println!("Clang args: {:?}", clang_args);
     }
 
     let bindings = bindgen::Builder::default()
@@ -237,7 +237,7 @@ fn main() {
 fn locate_cspice() -> Option<PathBuf> {
     match env::consts::OS {
         "linux" | "macos" if Path::new("/usr/lib/libcspice.a").exists() => {
-            println!("cargo:warning=Found system CSPICE at /usr");
+            println!("Found system CSPICE at /usr");
             Some(PathBuf::from("/usr"))
         }
         _ => None,
@@ -260,7 +260,7 @@ fn download_cspice(out_dir: &Path, target_info: &TargetInfo) {
 
     let download_target = out_dir.join(format!("cspice.{}", extension));
 
-    println!("cargo:warning=Downloading from: {}", url);
+    println!("Downloading from: {}", url);
 
     let body = reqwest::blocking::get(url)
         .expect("Failed to download CSPICE")
@@ -299,7 +299,7 @@ fn download_cspice(out_dir: &Path, target_info: &TargetInfo) {
         _ => unreachable!(),
     }
 
-    println!("cargo:warning=CSPICE download and extraction complete");
+    println!("CSPICE download and extraction complete");
 }
 
 // For docs.rs only we will bundle the headers
