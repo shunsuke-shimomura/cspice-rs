@@ -115,7 +115,7 @@ fn download_cspice(out_dir: &Path) {
     #[cfg(feature = "no-timeout")]
     let body = {
         let client = reqwest::blocking::Client::builder()
-            .timeout(None)  // disable timeout
+            .timeout(None) // disable timeout
             .build()
             .expect("Failed to build HTTP client");
 
