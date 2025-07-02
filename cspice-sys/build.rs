@@ -114,7 +114,7 @@ fn download_cspice(out_dir: &Path) {
 
     println!("Downloading from: {}", url);
 
-    // Tokioランタイムを作成して非同期ダウンロードを実行
+    // Create Tokio runtime and perform asynchronous download
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
