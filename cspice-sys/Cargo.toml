@@ -11,6 +11,7 @@ repository = "https://github.com/jacob-pro/cspice-rs"
 
 [features]
 downloadcspice = ["dep:reqwest"]
+no-timeout = []
 
 [dependencies]
 

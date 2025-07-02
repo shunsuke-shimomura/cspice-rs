@@ -112,10 +112,27 @@ fn download_cspice(out_dir: &Path) {
 
     let download_target = out_dir.join(format!("cspice.{}", extension));
 
+    #[cfg(feature = "no-timeout")]
+    let body = {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(None)  // disable timeout
+            .build()
+            .expect("Failed to build HTTP client");
+
+        client
+            .get(&url)
+            .send()
+            .expect("Failed to download CSPICE")
+            .bytes()
+            .unwrap()
+    };
+
+    #[cfg(not(feature = "no-timeout"))]
     let body = reqwest::blocking::get(url)
         .expect("Failed to download CSPICE")
         .bytes()
         .unwrap();
+
     std::fs::write(download_target, body).expect("Failed to write archive file");
 
     // Extract package based on platform
