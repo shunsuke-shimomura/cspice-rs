@@ -261,13 +261,17 @@ fn download_cspice(out_dir: &Path, target_info: &TargetInfo) {
     let download_target = out_dir.join(format!("cspice.{}", extension));
 
     println!("Downloading from: {}", url);
+  
+    // Tokioランタイムを作成して非同期ダウンロードを実行
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
 
-    let body = reqwest::blocking::get(url)
-        .expect("Failed to download CSPICE")
-        .bytes()
-        .unwrap();
+    let downloaded_bytes =
+        rt.block_on(async { download_cspice_async(&url, &download_target).await });
 
-    std::fs::write(&download_target, body).expect("Failed to write archive file");
+    println!("Download complete: {} bytes", downloaded_bytes);
 
     // Extract package based on platform
     match (env::consts::OS, extension) {
@@ -319,4 +323,97 @@ fn docs_rs(out_dir: &Path) {
         .expect("Unable to call tar");
     assert!(tar_status.success());
     env::set_var("CSPICE_DIR", headers_dir.as_os_str());
+}
+
+// Asynchronous download implementation
+#[cfg(feature = "downloadcspice")]
+async fn download_cspice_async(url: &str, download_target: &PathBuf) -> u64 {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    // HTTP client configuration
+    let client = reqwest::Client::builder()
+        // Connection timeout: 30 seconds
+        .connect_timeout(std::time::Duration::from_secs(30))
+        // Read timeout: 60 seconds (maximum wait time for next data chunk)
+        .read_timeout(std::time::Duration::from_secs(60))
+        // Do not set overall timeout
+        .build()
+        .expect("Failed to build HTTP client");
+
+    // Send request
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .expect("Failed to start CSPICE download");
+
+    // Check status code
+    if !response.status().is_success() {
+        panic!(
+            "Failed to download CSPICE: HTTP {} from {}",
+            response.status(),
+            url
+        );
+    }
+
+    // Get content size
+    let total_size = response.content_length();
+    if let Some(size) = total_size {
+        println!(
+            "Download size: {} bytes ({} MB)",
+            size,
+            size / (1024 * 1024)
+        );
+    }
+
+    // Streaming download
+    let mut file = std::fs::File::create(download_target).expect("Failed to create download file");
+
+    let mut downloaded = 0u64;
+    let mut stream = response.bytes_stream();
+
+    // Show initial progress
+    println!("Starting download from {}", url);
+    if let Some(total) = total_size {
+        println!("Progress: 0 MB / {} MB (0%)", total / (1024 * 1024));
+    }
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.expect("Failed to read download chunk");
+
+        file.write_all(&chunk)
+            .expect("Failed to write to download file");
+
+        downloaded += chunk.len() as u64;
+
+        // Progress display (every 1MB)
+        if downloaded % (1024 * 1024) < chunk.len() as u64 {
+            if let Some(total) = total_size {
+                let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
+                println!(
+                    "Progress: {} MB / {} MB ({}%)",
+                    downloaded / (1024 * 1024),
+                    total / (1024 * 1024),
+                    percent
+                );
+            } else {
+                println!("Downloaded {} MB", downloaded / (1024 * 1024));
+            }
+        }
+    }
+
+    file.flush().expect("Failed to flush download file");
+
+    // Verify download completion
+    if let Some(total) = total_size {
+        if downloaded != total {
+            panic!(
+                "Download incomplete: got {} bytes, expected {} bytes",
+                downloaded, total
+            );
+        }
+    }
+
+    downloaded
 }
