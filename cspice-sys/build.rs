@@ -114,14 +114,8 @@ fn download_cspice(out_dir: &Path) {
 
     println!("Downloading from: {}", url);
 
-    // Create Tokio runtime and perform asynchronous download
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime");
-
-    let downloaded_bytes =
-        rt.block_on(async { download_cspice_async(&url, &download_target).await });
+    // Download CSPICE using ureq
+    let downloaded_bytes = download_cspice_sync(&url, &download_target);
 
     println!("Download complete: {} bytes", downloaded_bytes);
 
@@ -177,31 +171,22 @@ fn docs_rs(out_dir: &Path) {
     env::set_var("CSPICE_DIR", headers_dir.as_os_str());
 }
 
-// Asynchronous download implementation
+// Synchronous download implementation using ureq
 #[cfg(feature = "downloadcspice")]
-async fn download_cspice_async(url: &str, download_target: &PathBuf) -> u64 {
-    use futures_util::StreamExt;
-    use std::io::Write;
+fn download_cspice_sync(url: &str, download_target: &PathBuf) -> u64 {
+    use std::io::{Read, Write};
 
-    // HTTP client configuration
-    let client = reqwest::Client::builder()
-        // Connection timeout: 30 seconds
-        .connect_timeout(std::time::Duration::from_secs(30))
-        // Read timeout: 60 seconds (maximum wait time for next data chunk)
-        .read_timeout(std::time::Duration::from_secs(60))
-        // Do not set overall timeout
+    // Send request with timeout configuration
+    let response = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(60))
         .build()
-        .expect("Failed to build HTTP client");
-
-    // Send request
-    let response = client
         .get(url)
-        .send()
-        .await
+        .call()
         .expect("Failed to start CSPICE download");
 
     // Check status code
-    if !response.status().is_success() {
+    if response.status() < 200 || response.status() >= 300 {
         panic!(
             "Failed to download CSPICE: HTTP {} from {}",
             response.status(),
@@ -210,7 +195,10 @@ async fn download_cspice_async(url: &str, download_target: &PathBuf) -> u64 {
     }
 
     // Get content size
-    let total_size = response.content_length();
+    let total_size = response
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok());
+    
     if let Some(size) = total_size {
         println!(
             "Download size: {} bytes ({} MB)",
@@ -219,11 +207,12 @@ async fn download_cspice_async(url: &str, download_target: &PathBuf) -> u64 {
         );
     }
 
-    // Streaming download
+    // Create output file
     let mut file = std::fs::File::create(download_target).expect("Failed to create download file");
 
     let mut downloaded = 0u64;
-    let mut stream = response.bytes_stream();
+    let mut reader = response.into_reader();
+    let mut buffer = vec![0u8; 8192]; // 8KB buffer
 
     // Show initial progress
     println!("Starting download from {}", url);
@@ -231,27 +220,32 @@ async fn download_cspice_async(url: &str, download_target: &PathBuf) -> u64 {
         println!("Progress: 0 MB / {} MB (0%)", total / (1024 * 1024));
     }
 
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.expect("Failed to read download chunk");
+    // Download with progress reporting
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                file.write_all(&buffer[..n])
+                    .expect("Failed to write to download file");
+                
+                downloaded += n as u64;
 
-        file.write_all(&chunk)
-            .expect("Failed to write to download file");
-
-        downloaded += chunk.len() as u64;
-
-        // Progress display (every 1MB)
-        if downloaded % (1024 * 1024) < chunk.len() as u64 {
-            if let Some(total) = total_size {
-                let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-                println!(
-                    "Progress: {} MB / {} MB ({}%)",
-                    downloaded / (1024 * 1024),
-                    total / (1024 * 1024),
-                    percent
-                );
-            } else {
-                println!("Downloaded {} MB", downloaded / (1024 * 1024));
+                // Progress display (every 1MB)
+                if downloaded % (1024 * 1024) < n as u64 {
+                    if let Some(total) = total_size {
+                        let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
+                        println!(
+                            "Progress: {} MB / {} MB ({}%)",
+                            downloaded / (1024 * 1024),
+                            total / (1024 * 1024),
+                            percent
+                        );
+                    } else {
+                        println!("Downloaded {} MB", downloaded / (1024 * 1024));
+                    }
+                }
             }
+            Err(e) => panic!("Failed to read download chunk: {}", e),
         }
     }
 
